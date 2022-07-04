@@ -95,6 +95,7 @@ jobs:
       - name: Run code coverage tool
         uses: actions-rs/tarpaulin@v0.1
         with:
+          out-type: Lcov
           args: "--all-features -v"
       - name: Upload
         uses: coverallsapp/github-action@master
