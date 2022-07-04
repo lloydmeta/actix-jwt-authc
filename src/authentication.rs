@@ -143,6 +143,10 @@ pub enum InvalidatedTokens<T = String> {
 pub trait InvalidatedJWTsReader<T = String> {
     /// Reads invalidated JWTs
     ///
+    /// The tokens returned should be _unexpired_ JWTs. Removing expired JWTs from the data source
+    /// is something that is handled out of band, as it could be done in different ways (e.g.
+    /// when inserting the JWTs, as a cron job, as part of the built-in capabilities of a datastore).
+    ///
     /// The read method will receive the last [InvalidatedTokensTag] that the middleware received
     /// as an argument, and must return either a variant of [InvalidatedTokens] or an IO error.
     async fn read(

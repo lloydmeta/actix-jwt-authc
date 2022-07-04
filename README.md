@@ -1,10 +1,11 @@
 ## actix-jwt-authc [![Crates.io](https://img.shields.io/crates/v/actix-jwt-authc.svg)](https://crates.io/crates/actix-jwt-authc) [![Continuous integration](https://github.com/lloydmeta/actix-jwt-authc/actions/workflows/ci.yaml/badge.svg)](https://github.com/lloydmeta/actix-jwt-authc/actions/workflows/ci.yaml)
 
-An JWT authentication middleware for Actix that supports checking for invalidated JWTs without paying the cost for a per-request
-IO call. It does this by periodically pulling a set of invalidated JWTs and storing them in memory from a reader implementation. 
+An JWT authentication middleware for Actix that supports checking for invalidated JWTs without paying the cost of a per-request
+IO call. It does this by periodically pulling a set of invalidated JWTs and storing them in memory from a reader implementation
+that can be efficiently implemented.
 
 This middleware is based on the assumption that since JWTs (should) have an expiry, ultimately, an in-memory set of 
-explicitly invalidated JWTs that are periodically reloaded (ie trimmed) should not be overwhelmingly big.
+explicitly invalidated unexpired JWTs that are periodically reloaded (ie trimmed) should not be overwhelmingly big.
 
 [Docs for `main`](https://beachape.com/actix-jwt-authc/actix_jwt_authc)
 
