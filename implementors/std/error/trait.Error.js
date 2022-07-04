@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["actix_jwt_authc"] = [{"text":"impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/std/error/trait.Error.html\" title=\"trait std::error::Error\">Error</a> for <a class=\"enum\" href=\"actix_jwt_authc/enum.Error.html\" title=\"enum actix_jwt_authc::Error\">Error</a>","synthetic":false,"types":["actix_jwt_authc::errors::Error"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()

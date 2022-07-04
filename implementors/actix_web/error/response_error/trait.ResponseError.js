@@ -1,0 +1,3 @@
+(function() {var implementors = {};
+implementors["actix_jwt_authc"] = [{"text":"impl ResponseError for <a class=\"enum\" href=\"actix_jwt_authc/enum.Error.html\" title=\"enum actix_jwt_authc::Error\">Error</a>","synthetic":false,"types":["actix_jwt_authc::errors::Error"]}];
+if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()
