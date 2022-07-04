@@ -212,9 +212,9 @@ impl<ClaimsType> AuthenticateMiddlewareFactory<ClaimsType>
 where
     ClaimsType: DeserializeOwned + 'static,
 {
-    /// Takes an [InvalidatedJWTsReader] returns a [[AuthenticateMiddlewareFactory] that knows how
+    /// Takes an [InvalidatedJWTsReader] returns a [AuthenticateMiddlewareFactory] that knows how
     /// to periodically use the [InvalidatedJWTsReader]'s read method to re-load an in-memory
-    /// set of invalidated JWTs that is then passed on to the factories that it spawns.
+    /// set of invalidated JWTs that is then passed on to the [AuthenticateMiddleware] that it spawns.
     ///
     /// The current periodic refresh implementation assumes this method is called from within
     /// an Actix runtime.
@@ -768,7 +768,7 @@ mod tests {
             test::call_service(&app, req).await
         };
         assert_eq!(actix_http::StatusCode::OK, login_resp.status());
-        tokio::time::sleep(Duration::from_secs(100)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
         #[cfg(feature = "session")]
         let (_login_response, session_resp) = {
             let mut req = test::TestRequest::get().uri("/session");
