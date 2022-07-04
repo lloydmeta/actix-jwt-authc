@@ -1,4 +1,4 @@
-## actix-jwt-authc
+## actix-jwt-authc [![Crates.io](https://img.shields.io/crates/v/actix-jwt-authc.svg)](https://crates.io/crates/actix-jwt-authc) [![Continuous integration](https://github.com/lloydmeta/actix-jwt-authc/actions/workflows/ci.yaml/badge.svg)](https://github.com/lloydmeta/actix-jwt-authc/actions/workflows/ci.yaml)
 
 An JWT authentication middleware for Actix that supports checking for invalidated JWTs without paying the cost for a per-request
 IO call. It does this by periodically pulling a set of invalidated JWTs and storing them in memory from a reader implementation. 
