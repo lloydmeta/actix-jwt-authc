@@ -81,6 +81,23 @@ jobs:
           command: test
           args: --all-features
 
+  code-cov:
+    name: Code coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Run code coverage tool
+        uses: actions-rs/tarpaulin@v0.1
+        with:
+          args: "--all-features -v"
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v1.0.2
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest

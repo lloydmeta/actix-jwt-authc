@@ -16,7 +16,6 @@
 //!
 //! use actix_jwt_authc::*;
 //! use actix_http::StatusCode;
-//! use actix_web::cookie::Key;
 //! use actix_web::web::Data;
 //! use actix_web::dev::{Service, ServiceResponse};
 //! use actix_web::{get, test, App, HttpResponse};
