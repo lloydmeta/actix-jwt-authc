@@ -1,0 +1,46 @@
+[package]
+name = "actix-jwt-authc"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lloyd <lloydmeta@gmail.com>"]
+description = "Actix middleware for authenticating JWTs with support for invalidation"
+license = "MIT"
+documentation = "https://docs.rs/actix-jwt-authc"
+repository = "https://github.com/lloydmeta/actix-jwt-authc"
+keywords = ["actix", "jwt", "invalidation", "authentication", "auth"]
+readme = "README.md"
+
+[features]
+default = []
+tracing = ["dep:tracing"]
+session = ["dep:actix-session"]
+
+# Enables tracing-based log (also brings in tracing)
+log = ["tracing/log"]
+
+[dependencies]
+async-trait = "0.1"
+futures-util = "0.3"
+tokio = { version = "1.19", features = ["sync"], default-features = false }
+actix-web = "4"
+actix-session = { version = "0.6", optional = true }
+jsonwebtoken = "8"
+serde = { version = "1.0", features = ["derive"] }
+derive_more = "0.99"
+time = "0.3"
+tracing = { version = "0.1", optional = true }
+
+[dev-dependencies]
+actix-session = { version = "0.6", features = ["cookie-session"] }
+actix-http = "3"
+dashmap = "5.3"
+uuid = { version = "1.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
+ring = "0.16"
+tracing-subscriber = "0.3"
+
+# docs.rs-specific configuration
+[package.metadata.docs.rs]
+# document all features
+all-features = true
+# defines the configuration attribute `docsrs`
+rustdoc-args = ["--cfg", "docsrs"]
