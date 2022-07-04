@@ -1356,9 +1356,9 @@
 <span class="kw">where</span>
     <span class="ident">ClaimsType</span>: <span class="ident">DeserializeOwned</span> <span class="op">+</span> <span class="lifetime">&#39;static</span>,
 {
-    <span class="doccomment">/// Takes an [InvalidatedJWTsReader] returns a [[AuthenticateMiddlewareFactory] that knows how</span>
+    <span class="doccomment">/// Takes an [InvalidatedJWTsReader] returns a [AuthenticateMiddlewareFactory] that knows how</span>
     <span class="doccomment">/// to periodically use the [InvalidatedJWTsReader]&#39;s read method to re-load an in-memory</span>
-    <span class="doccomment">/// set of invalidated JWTs that is then passed on to the factories that it spawns.</span>
+    <span class="doccomment">/// set of invalidated JWTs that is then passed on to the [AuthenticateMiddleware] that it spawns.</span>
     <span class="doccomment">///</span>
     <span class="doccomment">/// The current periodic refresh implementation assumes this method is called from within</span>
     <span class="doccomment">/// an Actix runtime.</span>
@@ -1912,7 +1912,7 @@
             <span class="ident">test::call_service</span>(<span class="kw-2">&amp;</span><span class="ident">app</span>, <span class="ident">req</span>).<span class="kw">await</span>
         };
         <span class="macro">assert_eq!</span>(<span class="ident">actix_http::StatusCode::OK</span>, <span class="ident">login_resp</span>.<span class="ident">status</span>());
-        <span class="ident">tokio::time::sleep</span>(<span class="ident">Duration::from_secs</span>(<span class="number">100</span>)).<span class="kw">await</span>;
+        <span class="ident">tokio::time::sleep</span>(<span class="ident">Duration::from_secs</span>(<span class="number">2</span>)).<span class="kw">await</span>;
         <span class="attribute">#[<span class="ident">cfg</span>(<span class="ident">feature</span> <span class="op">=</span> <span class="string">&quot;session&quot;</span>)]</span>
         <span class="kw">let</span> (<span class="ident">_login_response</span>, <span class="ident">session_resp</span>) <span class="op">=</span> {
             <span class="kw">let</span> <span class="kw-2">mut</span> <span class="ident">req</span> <span class="op">=</span> <span class="ident">test::TestRequest::get</span>().<span class="ident">uri</span>(<span class="string">&quot;/session&quot;</span>);
