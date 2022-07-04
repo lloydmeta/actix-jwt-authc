@@ -768,7 +768,7 @@ mod tests {
             test::call_service(&app, req).await
         };
         assert_eq!(actix_http::StatusCode::OK, login_resp.status());
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(100)).await;
         #[cfg(feature = "session")]
         let (_login_response, session_resp) = {
             let mut req = test::TestRequest::get().uri("/session");
@@ -842,7 +842,7 @@ mod tests {
         let logout_resp = test::call_service(&app, logout_req.to_request()).await;
         assert_eq!(actix_http::StatusCode::OK, logout_resp.status());
 
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let session_resp: actix_web::Error =
             { app.call(session_req.to_request()).await.err().unwrap() };
@@ -897,7 +897,7 @@ mod tests {
             .0
             .insert(JWT(login_response.bearer_token));
 
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let session_resp: actix_web::Error =
             { app.call(session_req.to_request()).await.err().unwrap() };

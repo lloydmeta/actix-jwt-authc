@@ -95,7 +95,7 @@
 //!   let logout_resp = test::call_service(&app, logout_req.to_request()).await;
 //!
 //!   // Wait until middleware reloads invalidated JWTs from central store
-//!   tokio::time::sleep(Duration::from_millis(2)).await;
+//!   tokio::time::sleep(Duration::from_millis(100)).await;
 //!
 //!   let session_resp_after_logout = {
 //!     let req = test::TestRequest::get().uri("/session").insert_header((
