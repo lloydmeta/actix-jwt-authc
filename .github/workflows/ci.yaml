@@ -95,8 +95,10 @@ jobs:
         uses: actions-rs/tarpaulin@v0.1
         with:
           args: "--all-features -v"
-      - name: Upload to codecov.io
-        uses: codecov/codecov-action@v3
+      - name: Upload
+        uses: coverallsapp/github-action@master
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   fmt:
     name: Rustfmt
