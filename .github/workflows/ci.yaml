@@ -48,7 +48,6 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --release
 
   test-session:
     name: Test (session)
@@ -64,7 +63,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --features session --release
+          args: --features session
 
   test-all:
     name: Test (all)
@@ -80,7 +79,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --all-features --release
+          args: --all-features
 
   fmt:
     name: Rustfmt
