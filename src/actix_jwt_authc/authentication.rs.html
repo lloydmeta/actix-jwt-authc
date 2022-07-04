@@ -1142,6 +1142,10 @@
 <span id="1136">1136</span>
 <span id="1137">1137</span>
 <span id="1138">1138</span>
+<span id="1139">1139</span>
+<span id="1140">1140</span>
+<span id="1141">1141</span>
+<span id="1142">1142</span>
 </pre><pre class="rust"><code><span class="kw">use</span> <span class="ident">std::collections::HashSet</span>;
 <span class="kw">use</span> <span class="ident">std::future</span>::{<span class="ident">ready</span>, <span class="ident">Ready</span>};
 <span class="kw">use</span> <span class="ident">std::marker::PhantomData</span>;
@@ -1286,6 +1290,10 @@
 <span class="attribute">#[<span class="ident">async_trait</span>]</span>
 <span class="kw">pub</span> <span class="kw">trait</span> <span class="ident">InvalidatedJWTsReader</span><span class="op">&lt;</span><span class="ident">T</span> <span class="op">=</span> <span class="ident">String</span><span class="op">&gt;</span> {
     <span class="doccomment">/// Reads invalidated JWTs</span>
+    <span class="doccomment">///</span>
+    <span class="doccomment">/// The tokens returned should be _unexpired_ JWTs. Removing expired JWTs from the data source</span>
+    <span class="doccomment">/// is something that is handled out of band, as it could be done in different ways (e.g.</span>
+    <span class="doccomment">/// when inserting the JWTs, as a cron job, as part of the built-in capabilities of a datastore).</span>
     <span class="doccomment">///</span>
     <span class="doccomment">/// The read method will receive the last [InvalidatedTokensTag] that the middleware received</span>
     <span class="doccomment">/// as an argument, and must return either a variant of [InvalidatedTokens] or an IO error.</span>
