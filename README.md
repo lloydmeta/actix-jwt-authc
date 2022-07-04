@@ -6,6 +6,8 @@ IO call. It does this by periodically pulling a set of invalidated JWTs and stor
 This middleware is based on the assumption that since JWTs (should) have an expiry, ultimately, an in-memory set of 
 explicitly invalidated JWTs that are periodically reloaded (ie trimmed) should not be overwhelmingly big.
 
+[Docs for `main`](https://beachape.com/actix-jwt-authc/actix_jwt_authc)
+
 ### Uses
 - [Actix](https://actix.rs)
 - [jsonwebtoken](https://github.com/Keats/jsonwebtoken) for JWT encoding + validation

@@ -23,7 +23,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         name: build docs
         env:
-          RUSTDOCFLAGS: "--cfg docsrs"
+          RUSTDOCFLAGS: "--enable-index-page -Zunstable-options --cfg docsrs"
         with:
           command: doc
           args: --all --all-features --no-deps
