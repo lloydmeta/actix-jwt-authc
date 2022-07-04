@@ -1,6 +1,6 @@
 ## actix-jwt-authc 
 [![Crates.io](https://img.shields.io/crates/v/actix-jwt-authc.svg)](https://crates.io/crates/actix-jwt-authc)
-[![docs.rs](https://img.shields.io/docsrs/actix-jwt-authc.svg?label=docs.rs)](https://crates.io/crates/actix-jwt-authc)
+[![docs.rs](https://img.shields.io/docsrs/actix-jwt-authc.svg?label=docs.rs)](https://docs.rs/actix-jwt-authc)
 [![Continuous integration](https://github.com/lloydmeta/actix-jwt-authc/actions/workflows/ci.yaml/badge.svg)](https://github.com/lloydmeta/actix-jwt-authc/actions/workflows/ci.yaml)
 
 JWT authentication middleware for Actix that supports checking for invalidated JWTs without paying the cost of a per-request

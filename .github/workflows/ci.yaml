@@ -96,7 +96,7 @@ jobs:
         uses: actions-rs/tarpaulin@v0.1
         with:
           out-type: Lcov
-          args: "--all-features -v"
+          args: "--all-features -v --output-dir=./coverage"
       - name: Upload
         uses: coverallsapp/github-action@master
         with:
