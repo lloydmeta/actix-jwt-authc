@@ -1,22 +1,28 @@
+use std::collections::HashSet;
 use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "session")]
 use actix_session::storage::CookieSessionStore;
+#[cfg(feature = "session")]
 use actix_session::{Session, SessionMiddleware};
+#[cfg(feature = "session")]
 use actix_web::cookie::Key;
 use actix_web::web::Data;
-use actix_web::{get, App, HttpResponse, HttpServer};
-use async_trait::async_trait;
+use actix_web::{get, rt, App, HttpResponse, HttpServer};
 use dashmap::DashMap;
+use futures::channel::{mpsc, mpsc::Sender};
+use futures::{SinkExt, Stream};
 use jsonwebtoken::*;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use time::ext::*;
 use time::OffsetDateTime;
+use tokio::sync::Mutex;
 #[cfg(feature = "tracing")]
-use tracing::Level;
+use tracing::{error, trace, Level};
 #[cfg(feature = "tracing")]
 use tracing_subscriber::FmtSubscriber;
 use uuid::Uuid;
@@ -39,7 +45,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let jwt_session_key = JWTSessionKey("jwt-session".to_string());
     let auth_middleware_settings = {
         AuthenticateMiddlewareSettings {
-            invalidated_jwt_reload_frequency: Duration::from_secs(10),
             jwt_decoding_key: jwt_signing_keys.decoding_key,
             #[cfg(feature = "session")]
             jwt_session_key: Some(jwt_session_key.clone()),
@@ -48,7 +53,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let invalidated_jwts_store = InvalidatedJWTStore(Arc::new(DashMap::new()));
+    let (invalidated_jwts_store, invalidation_events_stream) =
+        InvalidatedJWTStore::new_with_stream();
 
     // This emulates a mechanism that purges expired tokens; in real life, this will probably be
     // an out-of-band thing that is called once a day or so.
@@ -62,18 +68,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let auth_middleware_factory = AuthenticateMiddlewareFactory::<Claims>::new(
-        invalidated_jwts_store.clone(),
+        invalidation_events_stream,
         auth_middleware_settings.clone(),
     );
 
+    #[cfg(feature = "session")]
     let session_encryption_key = Key::generate();
 
     HttpServer::new(move || {
         #[cfg(feature = "session")]
-        let app_t = App::new().app_data(Data::new(jwt_session_key.clone()));
-        #[cfg(not(feature = "session"))]
-        let app_t = App::new();
-        app_t
+        let app_t = App::new()
+            .app_data(Data::new(jwt_session_key.clone()))
             .app_data(Data::new(invalidated_jwts_store.clone()))
             .app_data(Data::new(jwt_signing_keys.encoding_key.clone()))
             .wrap(auth_middleware_factory.clone())
@@ -85,7 +90,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .cookie_secure(false)
                 .cookie_http_only(true)
                 .build(),
-            )
+            );
+        #[cfg(not(feature = "session"))]
+        let app_t = App::new()
+            .app_data(Data::new(invalidated_jwts_store.clone()))
+            .app_data(Data::new(jwt_signing_keys.encoding_key.clone()))
+            .wrap(auth_middleware_factory.clone());
+        app_t
             .service(login)
             .service(logout)
             .service(session_info)
@@ -150,8 +161,9 @@ async fn maybe_session_info(
 async fn logout(
     invalidated_jwts: Data<InvalidatedJWTStore>,
     authenticated: Authenticated<Claims>,
-    session: Session,
+    #[cfg(feature = "session")] session: Session,
 ) -> Result<HttpResponse, Error> {
+    #[cfg(feature = "session")]
     session.clear();
     invalidated_jwts.add_to_invalidated(authenticated).await;
     Ok(HttpResponse::Ok().json(EmptyResponse {}))
@@ -159,41 +171,107 @@ async fn logout(
 
 //     Routes -->
 
-#[async_trait]
-trait InvalidatedJWTsWriter {
-    async fn add_to_invalidated(&self, authenticated: Authenticated<Claims>) -> ();
-
-    async fn purge_expired(&self) -> ();
+#[derive(Clone)]
+struct InvalidatedJWTStore {
+    store: Arc<DashMap<JWT, OffsetDateTime>>,
+    tx: Arc<Mutex<Sender<InvalidatedTokensEvent>>>,
 }
 
-// Holds a map of encoded JWT -> expiries
-#[derive(Clone)]
-struct InvalidatedJWTStore(Arc<DashMap<JWT, OffsetDateTime>>);
+impl InvalidatedJWTStore {
+    /// Returns a [InvalidatedJWTStore] with a Stream of [InvalidatedTokensEvent]s
+    fn new_with_stream() -> (
+        InvalidatedJWTStore,
+        impl Stream<Item = InvalidatedTokensEvent>,
+    ) {
+        let invalidated: Arc<DashMap<JWT, OffsetDateTime>> = Arc::new(DashMap::new());
 
-#[async_trait]
-impl InvalidatedJWTsWriter for InvalidatedJWTStore {
-    async fn add_to_invalidated(&self, authenticated: Authenticated<Claims>) {
+        // Since this is an in-memory, single server example, we use an in-memory channel to send
+        // changes to the middleware. In Real Life ™, this could be powered by a pub-sub / events
+        // channel for invalidated JWTs.
+        let (tx, rx) = mpsc::channel(100);
+        let mut tx_for_reload = tx.clone();
+        let invalidated_for_reload = invalidated.clone();
+
+        // In this implementation, every once in a while, we send a full reload from the data store
+        // down the stream in case we missed on any updates.
+        rt::spawn(async move {
+            let mut full_reload_interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                full_reload_interval.tick().await;
+                if invalidated_for_reload.is_empty() {
+                    #[cfg(feature = "tracing")]
+                    trace!("No invalidated tokens, skipping periodic full reload")
+                } else {
+                    if let Err(_e) = tx_for_reload
+                        .send(InvalidatedTokensEvent::Full(
+                            invalidated_for_reload
+                                .iter()
+                                .map(|k| k.key().clone())
+                                .collect(),
+                        ))
+                        .await
+                    {
+                        #[cfg(feature = "tracing")]
+                        error!(error = ?_e, "Failed to send periodic full reload")
+                    }
+                }
+            }
+        });
+        let tx_to_hold = Arc::new(Mutex::new(tx));
+        (
+            InvalidatedJWTStore {
+                store: invalidated,
+                tx: tx_to_hold,
+            },
+            rx,
+        )
+    }
+
+    async fn add_to_invalidated(&self, authenticated: Authenticated<Claims>) -> () {
         if let Ok(expiry) = OffsetDateTime::from_unix_timestamp(authenticated.claims.exp as i64) {
-            self.0.insert(authenticated.jwt, expiry);
+            self.store.insert(authenticated.jwt.clone(), expiry);
+            let mut tx = self.tx.lock().await;
+            if let Err(_e) = tx
+                .send(InvalidatedTokensEvent::Add(authenticated.jwt))
+                .await
+            {
+                #[cfg(feature = "tracing")]
+                error!(error = ?_e, "Failed to send update on adding to invalidated")
+            }
         }
     }
 
     async fn purge_expired(&self) {
-        self.0
-            .retain(|_, expires_at| expires_at >= &mut OffsetDateTime::now_utc())
-    }
-}
-
-#[async_trait]
-impl InvalidatedJWTsReader for InvalidatedJWTStore {
-    async fn read(
-        &self,
-        _tag: Option<&InvalidatedTokensTag>,
-    ) -> std::io::Result<InvalidatedTokens> {
-        Ok(InvalidatedTokens::Full {
-            tag: None,
-            all: self.0.iter().map(|k| k.key().clone()).collect(),
-        })
+        let expired: HashSet<JWT> = self
+            .store
+            .iter()
+            .filter_map(|e| {
+                if e.value() < &mut OffsetDateTime::now_utc() {
+                    Some(e.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if expired.is_empty() {
+            #[cfg(feature = "tracing")]
+            trace!("No expired invalidated tokens found")
+        } else {
+            self.store.retain(|k, _| !expired.contains(k));
+            let mut tx = self.tx.lock().await;
+            if let Err(_e) = tx
+                .send(InvalidatedTokensEvent::Diff {
+                    add: None,
+                    remove: Some(expired),
+                })
+                .await
+            {
+                {
+                    #[cfg(feature = "tracing")]
+                    error!(error = ?_e, "Failed to send expired diff")
+                }
+            }
+        }
     }
 }
 
