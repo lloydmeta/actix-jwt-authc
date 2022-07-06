@@ -1254,8 +1254,8 @@
 <span class="doccomment">/// A factory for the authentication middleware.</span>
 <span class="doccomment">///</span>
 <span class="doccomment">/// This is meant to be instantiated once during bootstrap and *cloned* to the app factory</span>
-<span class="doccomment">/// closure. That way, there is a single set of invalidated JWTs held in memory, refreshed by</span>
-<span class="doccomment">/// a single periodic timer.</span>
+<span class="doccomment">/// closure. That way, there is a single set of invalidated JWTs held in memory, updated by</span>
+<span class="doccomment">/// a stream.</span>
 <span class="doccomment">///</span>
 <span class="doccomment">/// Cloning is cheap because internally this uses [Arc]s to hold state.</span>
 <span class="attribute">#[<span class="ident">derive</span>(<span class="ident">Clone</span>)]</span>
