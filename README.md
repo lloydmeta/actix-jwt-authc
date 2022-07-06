@@ -5,12 +5,11 @@
 [![Coverage Status](https://coveralls.io/repos/github/lloydmeta/actix-jwt-authc/badge.svg?branch=main)](https://coveralls.io/github/lloydmeta/actix-jwt-authc?branch=main)
 
 JWT authentication middleware for Actix that supports checking for invalidated JWTs without paying the cost of a per-request
-IO call. It periodically pulls a set of invalidated JWTs and storing them in memory from a reader implementation that 
-can be efficiently implemented.
+IO call. It sources invalidated JWTs from a Stream and stores them in memory.
 
 This middleware is based on the assumption that since JWTs (should) have an expiry, ultimately, an in-memory set of 
 explicitly-invalidated-yet-unexpired JWTs that are periodically reloaded should not be overwhelmingly big enough to 
-cause problems. Only measurements can help answer if it causes problems in your specific usecase.
+cause problems. Only testing can truly answer if this assumption works for a given usecase.
 
 [Docs for `main`](https://beachape.com/actix-jwt-authc/actix_jwt_authc)
 
@@ -32,6 +31,7 @@ The example included in this repo has
 - A simple set of routes for starting and inspecting the current session
 - An in-memory implementation of the invalidated JWT interface
   - In-memory loop for purging expired JWTs from the store
+  - Channel-based Stream of invalidated JWT events for powering the invalidated JWT set used by the middleware
 - [ring](https://github.com/briansmith/ring) to generate an Ed25519 keypair for [EdDSA-signed JWTs](https://www.scottbrady91.com/jose/jwts-which-signing-algorithm-should-i-use)
 
 Both session and JWT keys are generated on the fly, so JWTs are incompatible across restarts.
