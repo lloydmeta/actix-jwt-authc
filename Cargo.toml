@@ -19,7 +19,6 @@ session = ["dep:actix-session"]
 log = ["tracing/log"]
 
 [dependencies]
-async-trait = "0.1"
 futures-util = "0.3"
 tokio = { version = "1.19", features = ["sync"], default-features = false }
 actix-web = "4"
@@ -37,6 +36,7 @@ dashmap = "5.3"
 uuid = { version = "1.1", features = ["v4", "fast-rng", "macro-diagnostics"] }
 ring = "0.16"
 tracing-subscriber = "0.3"
+futures = "0.3"
 
 # docs.rs-specific configuration
 [package.metadata.docs.rs]

@@ -3,22 +3,20 @@ use std::future::{ready, Ready};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 #[cfg(feature = "session")]
 use actix_session::SessionExt;
 use actix_web::dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform};
 use actix_web::{rt, FromRequest, HttpMessage};
-use async_trait::async_trait;
 use derive_more::Display;
 use futures_util::future::LocalBoxFuture;
-use futures_util::FutureExt;
+use futures_util::{FutureExt, Stream, StreamExt};
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 #[cfg(feature = "tracing")]
-use tracing::{error, info, trace};
+use tracing::{info, trace};
 
 use crate::errors::Error;
 
@@ -112,53 +110,32 @@ pub struct JWT(pub String);
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct JWTSessionKey(pub String);
 
-/// An opaque tag that can be used in [InvalidatedJWTsReader] implementations for improving
-/// the efficiency of periodic reads
+/// Describes changes to invalidated tokens
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct InvalidatedTokensTag<T = String>(pub T);
+pub enum InvalidatedTokensEvent {
+    /// A full reload of invalidated [JWT]s
+    Full(HashSet<JWT>),
 
-/// The happy-path result of [InvalidatedJWTsReader::read].
-///
-/// The variants allow implementations of [InvalidatedJWTsReader] to not need to return the full set
-/// of invalidated JWTs depending on the current in-memory state, as described by [InvalidatedTokensTag],
-/// thus allowing more efficiency.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub enum InvalidatedTokens<T = String> {
-    NoChange(Option<InvalidatedTokensTag<T>>),
-
-    Full {
-        tag: Option<InvalidatedTokensTag<T>>,
-        all: HashSet<JWT>,
-    },
-
+    /// A batched "diff" invalidated [JWT]s
     Diff {
-        tag: Option<InvalidatedTokensTag<T>>,
-        add: HashSet<JWT>,
-        remove: HashSet<JWT>,
+        add: Option<HashSet<JWT>>,
+        remove: Option<HashSet<JWT>>,
     },
-}
 
-/// A reader for invalidated JWTs, for instance from an external shared data store.
-#[async_trait]
-pub trait InvalidatedJWTsReader<T = String> {
-    /// Reads invalidated JWTs
-    ///
-    /// The tokens returned should be _unexpired_ JWTs. Removing expired JWTs from the data source
-    /// is something that is handled out of band, as it could be done in different ways (e.g.
-    /// when inserting the JWTs, as a cron job, as part of the built-in capabilities of a datastore).
-    ///
-    /// The read method will receive the last [InvalidatedTokensTag] that the middleware received
-    /// as an argument, and must return either a variant of [InvalidatedTokens] or an IO error.
-    async fn read(
-        &self,
-        tag: Option<&InvalidatedTokensTag<T>>,
-    ) -> std::io::Result<InvalidatedTokens<T>>;
+    /// Add a single invalidated [JWT]
+    Add(JWT),
+
+    /// Remove a single invalidated [JWT]
+    Remove(JWT),
 }
 
 #[derive(Eq, PartialEq, Debug)]
-struct InvalidatedJWTsState<T = String> {
-    tag: Option<InvalidatedTokensTag<T>>,
-    invalidated_jwts: HashSet<JWT>,
+struct InvalidatedJWTsState(HashSet<JWT>);
+
+impl InvalidatedJWTsState {
+    fn new() -> InvalidatedJWTsState {
+        InvalidatedJWTsState(HashSet::new())
+    }
 }
 
 // <-- Middleware
@@ -167,9 +144,6 @@ struct InvalidatedJWTsState<T = String> {
 /// will work.
 #[derive(Clone)]
 pub struct AuthenticateMiddlewareSettings {
-    /// How frequently the in-memory set of invalidated JWTs should be reloaded
-    pub invalidated_jwt_reload_frequency: Duration,
-
     /// JWT Decoding Key; used to ensure that JWTs were signed by a trusted source
     pub jwt_decoding_key: DecodingKey,
 
@@ -216,39 +190,24 @@ impl<ClaimsType> AuthenticateMiddlewareFactory<ClaimsType>
 where
     ClaimsType: DeserializeOwned + 'static,
 {
-    /// Takes an [InvalidatedJWTsReader] returns a [AuthenticateMiddlewareFactory] that knows how
-    /// to periodically use the [InvalidatedJWTsReader]'s read method to re-load an in-memory
-    /// set of invalidated JWTs that is then passed on to the [AuthenticateMiddleware] that it spawns.
-    ///
-    /// The current periodic refresh implementation assumes this method is called from within
-    /// an Actix runtime.
-    pub fn new<R>(
-        reader: R,
+    /// Takes a [futures_util::Stream] of [InvalidatedTokensEvent]s and returns a [AuthenticateMiddlewareFactory]
+    /// that knows how consume the stream to populate an in-memory set of invalidated JWTs that is
+    /// then passed on to the [AuthenticateMiddleware] that it spawns.
+    pub fn new<S>(
+        invalidated_jwts_events: S,
         settings: AuthenticateMiddlewareSettings,
     ) -> AuthenticateMiddlewareFactory<ClaimsType>
     where
-        R: InvalidatedJWTsReader + Sync + Send + 'static,
+        S: Stream<Item = InvalidatedTokensEvent> + Unpin + 'static,
     {
-        let invalidated_jwts_state = Arc::new(RwLock::new(InvalidatedJWTsState {
-            tag: None,
-            invalidated_jwts: HashSet::new(),
-        }));
-        let invalidated_jwts_state_reload_ref = invalidated_jwts_state.clone();
-
-        let invalidated_jwt_reload_frequency = settings.invalidated_jwt_reload_frequency;
+        let invalidated_jwts_state = Arc::new(RwLock::new(InvalidatedJWTsState::new()));
 
         #[cfg(feature = "tracing")]
-        info!(
-            frequency = ?invalidated_jwt_reload_frequency,
-            "Kicking off invalidated JWT reload loop"
-        );
-        rt::spawn(async move {
-            let mut interval = tokio::time::interval(invalidated_jwt_reload_frequency);
-            loop {
-                interval.tick().await;
-                reload_invalidated(&reader, &invalidated_jwts_state_reload_ref).await;
-            }
-        });
+        info!("Kicking off invalidated JWT reload loop");
+        rt::spawn(reload_from_stream(
+            invalidated_jwts_events,
+            invalidated_jwts_state.clone(),
+        ));
 
         AuthenticateMiddlewareFactory::<ClaimsType> {
             invalidated_jwts_state,
@@ -273,44 +232,56 @@ where
 
 #[cfg_attr(
     feature = "tracing",
-    tracing::instrument(level = "trace", skip(reader, invalidated_jwts_set_reload_ref))
+    tracing::instrument(level = "trace", skip(events, invalidated_jwts_set))
 )]
-async fn reload_invalidated<R>(
-    reader: &R,
-    invalidated_jwts_set_reload_ref: &Arc<RwLock<InvalidatedJWTsState>>,
+async fn reload_from_stream<S>(
+    mut events: S,
+    invalidated_jwts_set: Arc<RwLock<InvalidatedJWTsState>>,
 ) where
-    R: InvalidatedJWTsReader,
+    S: Stream<Item = InvalidatedTokensEvent> + Unpin,
 {
-    #[cfg(feature = "tracing")]
-    trace!("Running invalidated JWT reload reload");
-    let mut invalidated_state = invalidated_jwts_set_reload_ref.write().await;
-    let invalidated_jwts_result = reader.read(invalidated_state.tag.as_ref()).await;
-    match invalidated_jwts_result {
-        Ok(invalidated_jwts) => match invalidated_jwts {
-            InvalidatedTokens::NoChange(tag) => {
+    while let Some(invalidated_jwt_event) = events.next().await {
+        #[cfg(feature = "tracing")]
+        trace!("Received invalidated JWTs event");
+        let mut invalidated_state = invalidated_jwts_set.write().await;
+        match invalidated_jwt_event {
+            InvalidatedTokensEvent::Full(all) => {
                 #[cfg(feature = "tracing")]
-                trace!(tag =? tag, "No change from invalidated JWTs reader");
-                invalidated_state.tag = tag;
+                trace!(count = all.len(), "Received invalidated JWTs with full set");
+                invalidated_state.0 = all;
             }
-            InvalidatedTokens::Full { tag, all } => {
+            InvalidatedTokensEvent::Diff { add, remove } => {
                 #[cfg(feature = "tracing")]
-                trace!(tag =? tag, count = all.len(), "Read invalidated JWTs, which returned a full set");
-                invalidated_state.invalidated_jwts = all;
-                invalidated_state.tag = tag;
-            }
-            InvalidatedTokens::Diff { tag, add, remove } => {
-                #[cfg(feature = "tracing")]
-                trace!(tag =? tag, add_count = add.len(), remove_count = remove.len(), "Read invalidated JWTs, which returned a diff");
-                for to_remove in remove.iter() {
-                    invalidated_state.invalidated_jwts.remove(to_remove);
+                trace!("Received invalidated JWTs diff");
+                if let Some(to_remove) = remove {
+                    #[cfg(feature = "tracing")]
+                    trace!(
+                        remove_count = to_remove.len(),
+                        "Received invalidated JWTs diff, with removals"
+                    );
+                    for to_remove in to_remove.iter() {
+                        invalidated_state.0.remove(to_remove);
+                    }
                 }
-                invalidated_state.invalidated_jwts.extend(add);
-                invalidated_state.tag = tag;
+                if let Some(to_add) = add {
+                    #[cfg(feature = "tracing")]
+                    trace!(
+                        add_count = to_add.len(),
+                        "Received invalidated JWTs diff, with additions"
+                    );
+                    invalidated_state.0.extend(to_add);
+                }
             }
-        },
-        Err(_e) => {
-            #[cfg(feature = "tracing")]
-            error!(error = ?_e, "Failed to fetch invalidated JWTs [{}]", _e)
+            InvalidatedTokensEvent::Remove(jwt) => {
+                #[cfg(feature = "tracing")]
+                trace!("Received Invalidated token to remove");
+                invalidated_state.0.remove(&jwt);
+            }
+            InvalidatedTokensEvent::Add(jwt) => {
+                #[cfg(feature = "tracing")]
+                trace!("Received Invalidated token to add");
+                invalidated_state.0.insert(jwt);
+            }
         }
     }
 }
@@ -417,12 +388,7 @@ where
         #[cfg(feature = "tracing")]
         trace!(jwt = ?jwt, "JWT extracted");
         let jwt_str = jwt.0.as_str();
-        if invalidated_jwts_state
-            .read()
-            .await
-            .invalidated_jwts
-            .contains(&jwt)
-        {
+        if invalidated_jwts_state.read().await.0.contains(&jwt) {
             #[cfg(feature = "tracing")]
             trace!(jwt= ?jwt, "Invalidated JWT detected");
             Err(Error::InvalidSession(format!(
@@ -478,93 +444,89 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    #[cfg(feature = "session")]
     use actix_session::storage::CookieSessionStore;
-    #[cfg(not(feature = "session"))]
+    #[cfg(feature = "session")]
+    use actix_session::Session;
+    #[cfg(feature = "session")]
     use actix_session::SessionMiddleware;
     #[cfg(feature = "session")]
-    use actix_session::{Session, SessionMiddleware};
     use actix_web::cookie::Key;
     use actix_web::web::Data;
     use actix_web::{get, test, App, HttpResponse};
-    use async_trait::async_trait;
     use dashmap::DashSet;
+    use futures::channel::{mpsc, mpsc::Sender};
+    use futures::SinkExt;
     use jsonwebtoken::*;
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use serde::{Deserialize, Serialize};
     use time::ext::*;
     use time::OffsetDateTime;
+    use tokio::sync::Mutex;
+    #[cfg(feature = "tracing")]
+    use tracing::error;
     use uuid::Uuid;
 
     use super::*;
 
-    #[derive(Clone)]
-    struct StubbedReader {
-        received_tag: Arc<RwLock<Option<InvalidatedTokensTag>>>,
-        to_return: Result<InvalidatedTokens, String>,
-    }
-
-    #[async_trait]
-    impl InvalidatedJWTsReader for StubbedReader {
-        async fn read(
-            &self,
-            tag: Option<&InvalidatedTokensTag>,
-        ) -> std::io::Result<InvalidatedTokens> {
-            match &self.to_return {
-                Ok(_) => {
-                    *self.received_tag.write().await = tag.cloned();
-                    self.to_return
-                        .clone()
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-                }
-                Err(_) => self
-                    .to_return
-                    .clone()
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)),
-            }
-        }
-    }
-
     #[test]
-    async fn test_reload_invalidated_full_replace() {
+    async fn test_reload_from_stream_full_replace() {
         let mut full_invalidated_set = HashSet::new();
         full_invalidated_set.insert(JWT("1".to_string()));
         full_invalidated_set.insert(JWT("2".to_string()));
         full_invalidated_set.insert(JWT("3".to_string()));
 
-        let state = Arc::new(RwLock::new(InvalidatedJWTsState {
-            tag: None,
-            invalidated_jwts: HashSet::new(),
-        }));
+        let full = InvalidatedTokensEvent::Full(full_invalidated_set.clone());
 
-        let new_tag = InvalidatedTokensTag("new-state-tag".to_string());
-        let stubbed_reader_with_tag = StubbedReader {
-            received_tag: Arc::new(Default::default()),
-            to_return: Ok(InvalidatedTokens::Full {
-                tag: Some(new_tag.clone()),
-                all: full_invalidated_set.clone(),
-            }),
-        };
-        reload_invalidated(&stubbed_reader_with_tag, &state).await;
+        let state = Arc::new(RwLock::new(InvalidatedJWTsState::new()));
 
-        assert_eq!(full_invalidated_set, state.read().await.invalidated_jwts);
-        assert_eq!(Some(new_tag), state.read().await.tag);
+        let (mut tx, rx) = futures::channel::mpsc::channel(100);
 
-        let stubbed_reader_no_tag = StubbedReader {
-            received_tag: Arc::new(Default::default()),
-            to_return: Ok(InvalidatedTokens::Full {
-                tag: None,
-                all: HashSet::new(),
-            }),
-        };
-        reload_invalidated(&stubbed_reader_no_tag, &state).await;
+        actix_web::rt::spawn(reload_from_stream(rx, state.clone()));
 
-        assert!(state.read().await.invalidated_jwts.is_empty());
-        assert!(state.read().await.tag.is_none());
+        tx.send(full).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        assert_eq!(full_invalidated_set, state.read().await.0);
     }
 
     #[test]
-    async fn test_reload_invalidated_diff() {
+    async fn test_reload_from_stream_full_add() {
+        let state = Arc::new(RwLock::new(InvalidatedJWTsState::new()));
+
+        let (mut tx, rx) = futures::channel::mpsc::channel(100);
+        actix_web::rt::spawn(reload_from_stream(rx, state.clone()));
+
+        let add = InvalidatedTokensEvent::Add(JWT("1".to_string()));
+        tx.send(add).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let mut expected_invalidated_set = HashSet::new();
+        expected_invalidated_set.insert(JWT("1".to_string()));
+
+        assert_eq!(expected_invalidated_set, state.read().await.0);
+    }
+
+    #[test]
+    async fn test_reload_from_stream_full_remove() {
+        let mut current_state = HashSet::new();
+        current_state.insert(JWT("1".to_string()));
+
+        let state = Arc::new(RwLock::new(InvalidatedJWTsState(current_state)));
+        let (mut tx, rx) = futures::channel::mpsc::channel(100);
+
+        actix_web::rt::spawn(reload_from_stream(rx, state.clone()));
+
+        let remove = InvalidatedTokensEvent::Remove(JWT("1".to_string()));
+        tx.send(remove).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        assert!(state.read().await.0.is_empty());
+    }
+
+    #[test]
+    async fn test_reload_stream_diff() {
         let mut full_invalidated_set = HashSet::new();
         full_invalidated_set.insert(JWT("1".to_string()));
         full_invalidated_set.insert(JWT("2".to_string()));
@@ -576,82 +538,41 @@ mod tests {
         let mut remove_set = HashSet::new();
         remove_set.insert(JWT("1".to_string()));
 
-        let state = Arc::new(RwLock::new(InvalidatedJWTsState {
-            tag: None,
-            invalidated_jwts: full_invalidated_set,
-        }));
-
-        let new_tag = InvalidatedTokensTag("new-state-tag".to_string());
-        let stubbed_reader_with_tag = StubbedReader {
-            received_tag: Arc::new(Default::default()),
-            to_return: Ok(InvalidatedTokens::Diff {
-                tag: Some(new_tag.clone()),
-                add: add_set.clone(),
-                remove: remove_set,
-            }),
+        let diff_1 = InvalidatedTokensEvent::Diff {
+            add: Some(add_set),
+            remove: Some(remove_set),
         };
-        reload_invalidated(&stubbed_reader_with_tag, &state).await;
+
+        let state = Arc::new(RwLock::new(InvalidatedJWTsState(full_invalidated_set)));
+
+        let (mut tx, rx) = futures::channel::mpsc::channel(100);
+
+        actix_web::rt::spawn(reload_from_stream(rx, state.clone()));
+
+        tx.send(diff_1).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         let mut expected_invalidated_set = HashSet::new();
         expected_invalidated_set.insert(JWT("2".to_string()));
         expected_invalidated_set.insert(JWT("3".to_string()));
         expected_invalidated_set.insert(JWT("4".to_string()));
 
-        assert_eq!(
-            expected_invalidated_set,
-            state.read().await.invalidated_jwts
-        );
-        assert_eq!(Some(new_tag), state.read().await.tag);
+        assert_eq!(expected_invalidated_set, state.read().await.0);
 
         let mut remove_set_2 = HashSet::new();
         remove_set_2.insert(JWT("2".to_string()));
         remove_set_2.insert(JWT("3".to_string()));
         remove_set_2.insert(JWT("4".to_string()));
 
-        let stubbed_reader_no_tag = StubbedReader {
-            received_tag: Arc::new(Default::default()),
-            to_return: Ok(InvalidatedTokens::Diff {
-                tag: None,
-                add: HashSet::new(),
-                remove: remove_set_2,
-            }),
+        let diff_2 = InvalidatedTokensEvent::Diff {
+            add: None,
+            remove: Some(remove_set_2),
         };
-        reload_invalidated(&stubbed_reader_no_tag, &state).await;
 
-        assert!(state.read().await.invalidated_jwts.is_empty());
-        assert!(state.read().await.tag.is_none());
-    }
+        tx.send(diff_2).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
-    #[test]
-    async fn test_reload_invalidated_no_change() {
-        let mut full_invalidated_set = HashSet::new();
-        full_invalidated_set.insert(JWT("1".to_string()));
-        full_invalidated_set.insert(JWT("2".to_string()));
-        full_invalidated_set.insert(JWT("3".to_string()));
-
-        let state = Arc::new(RwLock::new(InvalidatedJWTsState {
-            tag: None,
-            invalidated_jwts: full_invalidated_set.clone(),
-        }));
-
-        let new_tag = InvalidatedTokensTag("new-state-tag".to_string());
-        let stubbed_reader_with_tag = StubbedReader {
-            received_tag: Arc::new(Default::default()),
-            to_return: Ok(InvalidatedTokens::NoChange(Some(new_tag.clone()))),
-        };
-        reload_invalidated(&stubbed_reader_with_tag, &state).await;
-
-        assert_eq!(full_invalidated_set, state.read().await.invalidated_jwts);
-        assert_eq!(Some(new_tag), state.read().await.tag);
-
-        let stubbed_reader_no_tag = StubbedReader {
-            received_tag: Arc::new(Default::default()),
-            to_return: Ok(InvalidatedTokens::NoChange(None)),
-        };
-        reload_invalidated(&stubbed_reader_no_tag, &state).await;
-
-        assert_eq!(full_invalidated_set, state.read().await.invalidated_jwts);
-        assert!(state.read().await.tag.is_none());
+        assert!(state.read().await.0.is_empty());
     }
 
     #[test]
@@ -896,10 +817,14 @@ mod tests {
             (login_response, req)
         };
 
+        let authenticated = Authenticated {
+            jwt: JWT(login_response.bearer_token),
+            claims: login_response.claims,
+        };
         fixture
             .invalidated_jwts_store
-            .0
-            .insert(JWT(login_response.bearer_token));
+            .add_to_invalidated(authenticated)
+            .await;
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -944,7 +869,6 @@ mod tests {
         validator.leeway = 1;
 
         let auth_middleware_settings = AuthenticateMiddlewareSettings {
-            invalidated_jwt_reload_frequency: Duration::from_nanos(1),
             jwt_decoding_key: jwt_signing_keys.decoding_key,
             #[cfg(feature = "session")]
             jwt_session_key: Some(jwt_session_key.clone()),
@@ -952,34 +876,38 @@ mod tests {
             jwt_validator: validator,
         };
 
-        let invalidated_jwts_store = InvalidatedJWTStore(Arc::new(DashSet::new()));
-        let auth_middleware_factory = AuthenticateMiddlewareFactory::<Claims>::new(
-            invalidated_jwts_store.clone(),
-            auth_middleware_settings.clone(),
-        );
+        let (invalidated_jwts_store, stream) = InvalidatedJWTStore::new_with_stream();
+        let auth_middleware_factory =
+            AuthenticateMiddlewareFactory::<Claims>::new(stream, auth_middleware_settings.clone());
 
+        #[cfg(feature = "session")]
         let session_encryption_key = Key::generate();
 
         let app = {
             #[cfg(feature = "session")]
-            let app_t = App::new().app_data(Data::new(jwt_session_key.clone()));
+            let app_t = App::new()
+                .app_data(Data::new(jwt_session_key.clone()))
+                .app_data(Data::new(invalidated_jwts_store.clone()))
+                .app_data(Data::new(jwt_signing_keys.encoding_key.clone()))
+                .app_data(Data::new(jwt_ttl.clone()))
+                .wrap(auth_middleware_factory.clone())
+                .wrap(
+                    SessionMiddleware::builder(
+                        CookieSessionStore::default(),
+                        session_encryption_key.clone(),
+                    )
+                    .cookie_secure(false)
+                    .cookie_http_only(true)
+                    .build(),
+                );
             #[cfg(not(feature = "session"))]
-            let app_t = App::new();
+            let app_t = App::new()
+                .app_data(Data::new(invalidated_jwts_store.clone()))
+                .app_data(Data::new(jwt_signing_keys.encoding_key.clone()))
+                .app_data(Data::new(jwt_ttl.clone()))
+                .wrap(auth_middleware_factory.clone());
             test::init_service(
                 app_t
-                    .app_data(Data::new(invalidated_jwts_store.clone()))
-                    .app_data(Data::new(jwt_signing_keys.encoding_key.clone()))
-                    .app_data(Data::new(jwt_ttl.clone()))
-                    .wrap(auth_middleware_factory.clone())
-                    .wrap(
-                        SessionMiddleware::builder(
-                            CookieSessionStore::default(),
-                            session_encryption_key.clone(),
-                        )
-                        .cookie_secure(false)
-                        .cookie_http_only(true)
-                        .build(),
-                    )
                     .service(login)
                     .service(logout)
                     .service(session_info)
@@ -1059,32 +987,39 @@ mod tests {
     const JWT_SIGNING_ALGO: Algorithm = Algorithm::EdDSA;
 
     // Holds a map of encoded JWT -> expiries
-
-    #[async_trait]
-    trait InvalidatedJWTsWriter {
-        async fn add_to_invalidated(&self, authenticated: Authenticated<Claims>) -> ();
-    }
-
     #[derive(Clone)]
-    struct InvalidatedJWTStore(Arc<DashSet<JWT>>);
-
-    #[async_trait]
-    impl InvalidatedJWTsWriter for InvalidatedJWTStore {
-        async fn add_to_invalidated(&self, authenticated: Authenticated<Claims>) {
-            self.0.insert(authenticated.jwt);
-        }
+    struct InvalidatedJWTStore {
+        store: Arc<DashSet<JWT>>,
+        tx: Arc<Mutex<Sender<InvalidatedTokensEvent>>>,
     }
 
-    #[async_trait]
-    impl InvalidatedJWTsReader for InvalidatedJWTStore {
-        async fn read(
-            &self,
-            _tag: Option<&InvalidatedTokensTag>,
-        ) -> std::io::Result<InvalidatedTokens> {
-            Ok(InvalidatedTokens::Full {
-                tag: None,
-                all: self.0.iter().map(|k| k.key().clone()).collect(),
-            })
+    impl InvalidatedJWTStore {
+        fn new_with_stream() -> (
+            InvalidatedJWTStore,
+            impl Stream<Item = InvalidatedTokensEvent>,
+        ) {
+            let invalidated = Arc::new(DashSet::new());
+            let (tx, rx) = mpsc::channel(100);
+            let tx_to_hold = Arc::new(Mutex::new(tx));
+            (
+                InvalidatedJWTStore {
+                    store: invalidated,
+                    tx: tx_to_hold,
+                },
+                rx,
+            )
+        }
+
+        async fn add_to_invalidated(&self, authenticated: Authenticated<Claims>) {
+            self.store.insert(authenticated.jwt.clone());
+            let mut tx = self.tx.lock().await;
+            if let Err(_e) = tx
+                .send(InvalidatedTokensEvent::Add(authenticated.jwt))
+                .await
+            {
+                #[cfg(feature = "tracing")]
+                error!(error = ?_e, "Failed to send update on adding to invalidated")
+            }
         }
     }
 

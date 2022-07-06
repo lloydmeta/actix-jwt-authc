@@ -1,5 +1,4 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
-
 //! This crate provides an Actix Web middleware that supports authentication of requests based
 //! on JWTs, with support for JWT invalidation without incurring a per-request performance hit of
 //! making IO calls to an external datastore.
@@ -10,6 +9,7 @@
 //! sessions-based authenticated sessions, refer to examples/inmemory.rs.
 //!
 //! ```
+//! use std::collections::HashSet;
 //! use std::ops::Add;
 //! use std::sync::Arc;
 //! use std::time::Duration;
@@ -19,8 +19,10 @@
 //! use actix_web::web::Data;
 //! use actix_web::dev::{Service, ServiceResponse};
 //! use actix_web::{get, test, App, HttpResponse};
-//! use async_trait::async_trait;
 //! use dashmap::DashSet;
+//! use futures::channel::{mpsc, mpsc::{channel, Sender}};
+//! use futures::SinkExt;
+//! use futures::stream::Stream;
 //! use jsonwebtoken::*;
 //! use ring::rand::SystemRandom;
 //! use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -28,6 +30,9 @@
 //! use time::ext::*;
 //! use time::OffsetDateTime;
 //! use uuid::Uuid;
+//! use tokio::sync::Mutex;
+//! # #[cfg(feature = "tracing")]
+//! # use tracing::error;
 //!
 //! const JWT_SIGNING_ALGO: Algorithm = Algorithm::EdDSA;
 //!
@@ -38,7 +43,6 @@
 //!   let validator = Validation::new(JWT_SIGNING_ALGO);
 //!
 //!   let auth_middleware_settings = AuthenticateMiddlewareSettings {
-//!       invalidated_jwt_reload_frequency: Duration::from_nanos(1),
 //!       # #[cfg(feature = "session")]
 //!       # jwt_session_key: Some(JWTSessionKey("jwt-session".to_string())),
 //!       jwt_decoding_key: jwt_signing_keys.decoding_key,
@@ -46,9 +50,9 @@
 //!       jwt_validator: validator,
 //!   };
 //!
-//!   let invalidated_jwts_store = InvalidatedJWTStore(Arc::new(DashSet::new()));
+//!   let (invalidated_jwts_store, stream) = InvalidatedJWTStore::new_with_stream();
 //!   let auth_middleware_factory = AuthenticateMiddlewareFactory::<Claims>::new(
-//!     invalidated_jwts_store.clone(),
+//!     stream,
 //!     auth_middleware_settings.clone(),
 //!   );
 //!
@@ -92,6 +96,8 @@
 //!     format!("Bearer {}", login_response.bearer_token),
 //!   ));
 //!   let logout_resp = test::call_service(&app, logout_req.to_request()).await;
+//!   assert_eq!(StatusCode::OK, logout_resp.status());
+//!   assert!(invalidated_jwts_store.store.contains(&JWT(login_response.bearer_token.clone())));
 //!
 //!   // Wait until middleware reloads invalidated JWTs from central store
 //!   tokio::time::sleep(Duration::from_millis(100)).await;
@@ -146,23 +152,42 @@
 //!     invalidated_jwts: Data<InvalidatedJWTStore>,
 //!     authenticated: Authenticated<Claims>
 //! ) -> Result<HttpResponse, Error> {
-//!     invalidated_jwts.0.insert(authenticated.jwt);
+//!     invalidated_jwts.add_to_invalidated(authenticated).await;
 //!     Ok(HttpResponse::Ok().json(EmptyResponse {}))
 //! }
 //!
 //! #[derive(Clone)]
-//! struct InvalidatedJWTStore(Arc<DashSet<JWT>>);
+//! struct InvalidatedJWTStore {
+//!     store: Arc<DashSet<JWT>>,
+//!     tx: Arc<Mutex<Sender<InvalidatedTokensEvent>>>,
+//! }
 //!
-//! #[async_trait]
-//! impl InvalidatedJWTsReader for InvalidatedJWTStore {
-//!     async fn read(
-//!         &self,
-//!         _tag: Option<&InvalidatedTokensTag>,
-//!     ) -> std::io::Result<InvalidatedTokens> {
-//!         Ok(InvalidatedTokens::Full {
-//!             tag: None,
-//!             all: self.0.iter().map(|k| k.key().clone()).collect(),
-//!         })
+//! impl InvalidatedJWTStore {
+//!
+//!     /// Returns a [InvalidatedJWTStore] with a Stream of [InvalidatedTokensEvent]s
+//!     fn new_with_stream() -> (InvalidatedJWTStore, impl Stream<Item = InvalidatedTokensEvent>) {
+//!         let invalidated = Arc::new(DashSet::new());
+//!         let (tx, rx) = mpsc::channel(100);
+//!         let tx_to_hold = Arc::new(Mutex::new(tx));
+//!         (
+//!             InvalidatedJWTStore {
+//!                 store: invalidated,
+//!                 tx: tx_to_hold,
+//!             },
+//!             rx,
+//!         )
+//!     }
+//!
+//!     async fn add_to_invalidated(&self, authenticated: Authenticated<Claims>) {
+//!         self.store.insert(authenticated.jwt.clone());
+//!         let mut tx = self.tx.lock().await;
+//!         if let Err(_e) = tx
+//!             .send(InvalidatedTokensEvent::Add(authenticated.jwt))
+//!             .await
+//!         {
+//!             #[cfg(feature = "tracing")]
+//!             error!(error = ?_e, "Failed to send update on adding to invalidated")
+//!         }
 //!     }
 //! }
 //!
@@ -203,8 +228,9 @@
 //!     claims: Claims,
 //! }
 //! ```
-mod authentication;
-mod errors;
 
 pub use authentication::*;
 pub use errors::*;
+
+mod authentication;
+mod errors;
