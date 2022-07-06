@@ -8,8 +8,9 @@ JWT authentication middleware for Actix that supports checking for invalidated J
 IO call. It sources invalidated JWTs from a Stream and stores them in memory.
 
 This middleware is based on the assumption that since JWTs (should) have an expiry, ultimately, an in-memory set of 
-explicitly-invalidated-yet-unexpired JWTs that are periodically reloaded should not be overwhelmingly big enough to 
-cause problems. Only testing can truly answer if this assumption works for a given usecase.
+explicitly-invalidated-yet-unexpired JWTs that are loaded from a stream (e.g. populated once on bootstrap, then
+updated via diffs) should not be overwhelmingly big enough to cause problems. Only testing can truly answer if this 
+assumption works for a given usecase.
 
 [Docs for `main`](https://beachape.com/actix-jwt-authc/actix_jwt_authc)
 
@@ -36,10 +37,10 @@ The example included in this repo has
 
 Both session and JWT keys are generated on the fly, so JWTs are incompatible across restarts.
 
-It supports `tracing` and `session` as features. To run a server on 8080:
+It supports `tracing`, `log` and `session` as features. To run a server on 8080:
 
 ```shell
-cargo run --example inmemory --features tracing,session
+cargo run --example inmemory --features tracing,session,log
 ```
 
 Supported endpoints
@@ -47,7 +48,7 @@ Supported endpoints
 - `/login` to start a session
 - `/logout` to destroy the current session (requires a session)
 - `/session` to inspect the current session (requires a session)
-- `/maybe_sesion` to inspect the current session if it exists
+- `/maybe_session` to inspect the current session if it exists
 
 If `session` is not passed, authentication in the example is dependent on `Bearer` tokens sent as an `Authorization` header.
 

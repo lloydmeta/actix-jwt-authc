@@ -171,8 +171,8 @@ pub struct AuthenticateMiddlewareSettings {
 /// A factory for the authentication middleware.
 ///
 /// This is meant to be instantiated once during bootstrap and *cloned* to the app factory
-/// closure. That way, there is a single set of invalidated JWTs held in memory, refreshed by
-/// a single periodic timer.
+/// closure. That way, there is a single set of invalidated JWTs held in memory, updated by
+/// a stream.
 ///
 /// Cloning is cheap because internally this uses [Arc]s to hold state.
 #[derive(Clone)]
